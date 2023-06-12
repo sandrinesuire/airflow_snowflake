@@ -1,0 +1,14 @@
+pandas
+matplotlib
+scipy
+scikit-learn
+jupyter
+ipympl
+notebook
+seaborn
+pandas-datareader
+yfinance
+apache-airflow[amazon]
+python-dotenv
+dbt
+dbt

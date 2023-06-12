@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: dbt_ssuire
+    database: pc_dbt_db  
+    tables:
+      - name: snowtable
+        columns:
+          - name: MyDate
+          - name: AdjClose
+

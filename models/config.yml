@@ -1,0 +1,42 @@
+version: 2
+
+models:
+  - name: prices_py
+
+    # Document within the same codebase
+    description: My prices transformation written in Python
+
+    # Configure in ways that feel intuitive and familiar
+    config:
+      packages:
+        - pandas
+        - numpy
+      materialized: table
+      tags: ['python']
+
+    # Test the results of my Python transformation
+    columns:
+      - name: MYDATE
+        # Standard validation for 'grain' of Python results
+        tests:
+          - unique
+          - not_null
+
+  - name: prices
+
+    # Document within the same codebase
+    description: My prices sql model selection
+
+    config:
+      materialized: table
+      tags: ['python']
+
+    # Test the results of my Python transformation
+    columns:
+      - name: MYDATE
+        # Standard validation for 'grain' of Python results
+        tests:
+          - unique
+          - not_null
+
+

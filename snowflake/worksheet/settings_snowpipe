@@ -1,0 +1,143 @@
+PC_DBT_DBPC_DBT_DB.DBT_SSUIREPC_DBT_DB.DBT_SSUIRE.PRICES use role accountadmin;
+
+-- authentification avec AWS
+create or replace storage INTEGRATION s3_int
+    TYPE = EXTERNAL_STAGE
+    STORAGE_PROVIDER = S3
+    ENABLED = TRUE
+    STORAGE_AWS_ROLE_ARN = "arn:aws:iam::.........:role/snowflake_role" --replace with .env var , come from AWS IAM role ARN
+    STORAGE_ALLOWED_LOCATIONS = ("s3://......./");  --replace with .env var
+
+DESC INTEGRATION s3_int; -- update storage_aws_iam_user_arn and storage_aws_external_id in aws iaw role trustrelationship
+
+-- base de donnée comprenant les objects de liaison avec AWS
+create or replace database snowpipe;
+
+-- zone de preparation à la reception de data de aws
+create or replace stage snowpipe.public.snowstage
+url="s3://......./"  --replace with .env var
+storage_integration=s3_int;
+
+describe stage snowpipe.public.snowstage;
+show stages;
+
+-- file format pour le csv
+create or replace FILE FORMAT snowpipe.public.csv_file_format
+    TYPE = CSV
+    SKIP_HEADER = 1
+  FIELD_DELIMITER = ','
+  RECORD_DELIMITER = '\n'
+  NULL_IF = ('NULL', 'null')
+  EMPTY_FIELD_AS_NULL = true
+  COMPRESSION = auto;
+
+
+-- table recevant les data des csv de aws
+create or replace table snowpipe.public.snowtable(
+    MyDate date not null CONSTRAINT uniq_date UNIQUE,
+    Open float,
+    High float,
+    Low float,
+    Close float,
+    AdjClose float,
+    Volume integer,
+    sys_dt timestamp default current_timestamp()
+    );
+
+    -- pipe permetant lors de l'event aws, de copy les csv dans la table
+create or replace pipe snowpipe.public.snowpipe auto_ingest=true as
+    copy into snowpipe.public.snowtable(MyDate,Open, High,Low,Close, AdjClose,Volume)
+    FROM (
+        select t.$1,t.$2,t.$3,t.$4,t.$5,t.$6,t.$7 from @snowpipe.public.snowstage/snowflake/ 
+        (file_format => 'snowpipe.public.csv_file_format', pattern=>'.*[.]csv') t
+        );
+
+
+show pipes;
+describe pipe snowpipe; -- update notification_channel in aws so bucket property eevent
+
+SELECT SYSTEM$PIPE_STATUS('snowpipe.public.snowpipe');
+
+select * from snowpipe.public.snowtable;
+select * from table(information_schema.copy_history(table_name=> 'snowpipe.public.snowtable',start_time=>dateadd(hours, -1, current_timestamp())));
+
+
+-- stream permetant de creer une able intermediaire contenant que les data à consomer
+create or replace stream snowpipe.public.snowstream
+on table snowpipe.public.snowtable;
+describe stream snowstream;
+
+
+-- create dataware house database and role user grant... for dbt PC_DBT_USER
+use role accountadmin;
+create or replace warehouse pc_dbt_wh WITH WAREHOUSE_SIZE='X-SMALL'; 
+create role loader;
+grant all on warehouse pc_dbt_wh to role pc_dbt_role; 
+CREATE or replace DATABASE pc_dbt_db;
+CREATE or replace schema pc_dbt_db.dbt_ssuire;
+create or replace role pc_dbt_role;
+CREATE OR REPLACE USER PC_DBT_USER;
+GRANT ROLE pc_dbt_role TO USER PC_DBT_USER;
+GRANT ROLE pc_dbt_role TO ROLE sysadmin;
+grant all on warehouse pc_dbt_wh to role pc_dbt_role;
+grant all on database pc_dbt_db to role pc_dbt_role;
+grant all on schema pc_dbt_db.dbt_ssuire to role pc_dbt_role;
+grant select on all tables in database pc_dbt_db to role pc_dbt_role;
+grant select on all views in database pc_dbt_db to role pc_dbt_role;
+
+
+
+create or replace table pc_dbt_db.dbt_ssuire.snowtable(
+    MyDate date,
+    Open float,
+    High float,
+    Low float,
+    Close float,
+    AdjClose float,
+    Volume integer,
+    sys_dt timestamp
+    );
+
+
+
+-- task sur le stream permetant de manipuler les data à consommer vers une nouvelle table
+create or replace task snowpipe.public.snowtask
+warehouse=COMPUTE_WH
+schedule="1 minute"
+when SYSTEM$STREAM_HAS_DATA('snowpipe.public.snowstream')
+as merge into pc_dbt_db.dbt_ssuire.snowtable ss
+using snowpipe.public.snowstream st
+on (st.MyDate=ss.MyDate and st.sys_dt=ss.sys_dt)
+when matched and (metadata$action='DELETE') then delete
+when matched and (metadata$action='INSERT') then UPDATE SET ss.Open=st.Open, ss.High=st.High, ss.Low=st.Low, ss.Close=st.Close, ss.AdjClose=st.AdjClose, ss.Volume=st.Volume, ss.sys_dt=st.sys_dt
+-- when not matched and st.sys_dt=ss.sys_dt then UPDATE SET ss.Open=st.Open, ss.High=st.High, ss.Low=st.Low, ss.Close=st.Close, ss.AdjClose=st.AdjClose, ss.Volume=st.Volume, ss.sys_dt=st.sys_dt
+when not matched then insert (MyDate, Open, High, Low, Close, AdjClose, Volume, sys_dt) values(st.MyDate, st.Open, st.High, st.Low, st.Close, st.AdjClose, st.Volume, st.sys_dt);
+
+drop table prices;
+alter task snowpipe.public.snowtask resume;
+desc task snowpipe.public.snowtask;
+
+-- task sur le db du csv pour nettoyer les duplicate
+create or replace task snowpipe.public.snowtask_del
+warehouse=COMPUTE_WH
+schedule="1 minute"
+as delete FROM snowpipe.public.snowtable
+where CONCAT(to_varchar(MyDate::TIMESTAMP) ,to_varchar(sys_dt::TIMESTAMP)) NOT IN 
+(
+    SELECT (CONCAT(to_varchar(MyDate::TIMESTAMP) ,to_varchar(max(sys_dt))::TIMESTAMP)
+) FROM snowpipe.public.snowtable GROUP BY MyDate);
+
+alter task snowpipe.public.snowtask_del resume;
+desc task snowpipe.public.snowtask_del;
+
+-- test
+select * from snowpipe.public.snowtable order by MyDate desc; 
+select * from snowpipe.public.snowstream;
+select * from pc_dbt_db.dbt_ssuire.snowtable order by MyDate desc;
+
+select * from snowpipe.public.snowtable order by MyDate desc;
+select * from snowpipe.public.snowstream;
+select * from pc_dbt_db.dbt_ssuire.snowtable order by MyDate desc;
+select * from table(information_schema.task_history())
+order by scheduled_time desc;
+
